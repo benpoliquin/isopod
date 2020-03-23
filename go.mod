@@ -1,5 +1,7 @@
 module github.com/cruise-automation/isopod
 
+go 1.14
+
 require (
 	github.com/Azure/go-ansiterm v0.0.0-20170929234023-d6e3b3328b78 // indirect
 	github.com/DataDog/datadog-go v0.0.0-20180822151419-281ae9f2d895 // indirect
@@ -117,6 +119,7 @@ require (
 	k8s.io/client-go v11.0.1-0.20190409021438-1a26190bd76a+incompatible
 	k8s.io/helm v2.14.3+incompatible
 	k8s.io/klog v0.3.0 // indirect
+	k8s.io/kube-aggregator v0.0.0-20191015220746-1fa97e0b871d
 	k8s.io/kube-openapi v0.0.0-20190418160015-6b3d3b2d5666 // indirect
 	k8s.io/kubernetes v1.14.1
 	k8s.io/utils v0.0.0-20190212002617-cdba02414f76 // indirect

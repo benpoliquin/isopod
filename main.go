@@ -18,6 +18,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	stdlog "log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -37,27 +38,25 @@ import (
 var version = "<unknown>"
 
 var (
-	// required
-	vaultToken = flag.String("vault_token", os.Getenv("VAULT_TOKEN"), "Vault token obtained during authentication.")
-	namespace  = flag.String("namespace", "default", "Kubernetes namespace to store metadata in.")
-
 	// optional
-	kubeconfig     = flag.String("kubeconfig", "", "Kubernetes client config path.")
-	addonRegex     = flag.String("match_addons", "", "Filters configured addons based on provided regex.")
-	isopodCtx      = flag.String("context", "", "Comma-separated list of `foo=bar' context parameters passed to the clusters Starlark function.")
-	dryRun         = flag.Bool("dry_run", false, "Print intended actions but don't mutate anything.")
-	svcAcctKeyFile = flag.String("sa_key", "", "Path to the service account json file.")
-	noSpin         = flag.Bool("nospin", false, "Disables command line status spinner.")
-	kubeDiff       = flag.Bool("kube_diff", false, "Print diff against live Kubernetes objects.")
-	showVersion    = flag.Bool("version", false, "Print binary version/system information and exit(0).")
-	relativePath   = flag.String("rel_path", "", "The base path used to interpret double slash prefix.")
+	vaultToken         = flag.String("vault_token", os.Getenv("VAULT_TOKEN"), "Vault token obtained during authentication.")
+	namespace          = flag.String("namespace", "default", "Kubernetes namespace to store metadata in.")
+	kubeconfig         = flag.String("kubeconfig", "", "Kubernetes client config path.")
+	addonRegex         = flag.String("match_addons", "", "Filters configured addons based on provided regex.")
+	isopodCtx          = flag.String("context", "", "Comma-separated list of `foo=bar' context parameters passed to the clusters Starlark function.")
+	dryRun             = flag.Bool("dry_run", false, "Print intended actions but don't mutate anything.")
+	svcAcctKeyFile     = flag.String("sa_key", "", "Path to the service account json file.")
+	noSpin             = flag.Bool("nospin", false, "Disables command line status spinner.")
+	kubeDiff           = flag.Bool("kube_diff", false, "Print diff against live Kubernetes objects.")
+	kubeDiffFilter     = util.StringsFlag("kube_diff_filter", []string{}, "Filter elements in diffs using JSONPath key matching.")
+	kubeDiffFilterFile = flag.String("kube_diff_filter_file", "", "Path to a file of filters delimited by new lines.")
+	showVersion        = flag.Bool("version", false, "Print binary version/system information and exit(0).")
+	relativePath       = flag.String("rel_path", "", "The base path used to interpret double slash prefix.")
 )
 
 func init() {
 	flag.Parse()
-	if *vaultToken == "" {
-		log.Fatalf("--vault_token or $VAULT_TOKEN must be set")
-	}
+	stdlog.SetFlags(stdlog.Lshortfile)
 }
 
 func usageAndDie() {
@@ -129,9 +128,21 @@ func buildAddonsRuntime(kubeC *rest.Config, mainFile string) (runtime.Runtime, e
 		helmBaseDir = filepath.Dir(mainFile)
 	}
 	st := store.New(cs, *namespace)
+
+	var diffFilters []string
+	if *kubeDiffFilterFile != "" {
+		diffFilters, err = util.LoadFilterFile(*kubeDiffFilterFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load diff filters: %v", err)
+		}
+	}
+	if len(*kubeDiffFilter) > 0 {
+		diffFilters = append(diffFilters, (*kubeDiffFilter)...)
+	}
+
 	opts := []runtime.Option{
 		runtime.WithVault(vaultC),
-		runtime.WithKube(kubeC, *kubeDiff),
+		runtime.WithKube(kubeC, *kubeDiff, diffFilters),
 		runtime.WithHelm(helmBaseDir),
 		runtime.WithAddonRegex(regexp.MustCompile(*addonRegex)),
 	}
@@ -154,11 +165,18 @@ func buildAddonsRuntime(kubeC *rest.Config, mainFile string) (runtime.Runtime, e
 	return addons, nil
 }
 
+type verboseGlogWriter struct{}
+
+func (w *verboseGlogWriter) Write(p []byte) (n int, err error) {
+	log.V(1).Info(string(p))
+	return len(p), nil
+}
+
 func main() {
 	ctx := context.Background()
 
-	// Redirects all output to standrad Go log to Google's log.
-	log.CopyStandardLogTo("INFO")
+	// Redirects all output to standrad Go log to Google's log at verbose level 1.
+	stdlog.SetOutput(&verboseGlogWriter{})
 	defer log.Flush()
 
 	if *showVersion {

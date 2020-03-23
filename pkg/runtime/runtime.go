@@ -15,11 +15,9 @@
 package runtime
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io/ioutil"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -35,8 +33,8 @@ import (
 	"github.com/cruise-automation/isopod/pkg/cloud/gke"
 	"github.com/cruise-automation/isopod/pkg/cloud/onprem"
 	"github.com/cruise-automation/isopod/pkg/loader"
+	"github.com/cruise-automation/isopod/pkg/modules"
 	"github.com/cruise-automation/isopod/pkg/store"
-	"github.com/cruise-automation/isopod/pkg/util"
 )
 
 const (
@@ -84,11 +82,11 @@ type Runtime interface {
 type runtime struct {
 	Config
 	// filename string
-	globals starlark.StringDict
-	pkgs    starlark.StringDict // Predeclared packages.
-	addonRe *regexp.Regexp
-	store   store.Store
-	noSpin  bool
+	globals        starlark.StringDict
+	pkgs           starlark.StringDict // Predeclared packages.
+	addonRe        *regexp.Regexp
+	store          store.Store
+	noSpin, dryrun bool
 }
 
 func init() {
@@ -123,7 +121,7 @@ func New(c *Config, opts ...Option) (Runtime, error) {
 
 	pkgs := options.pkgs
 	pkgs["addon"] = addon.NewAddonBuiltin(filepath.Dir(c.EntryFile), options.pkgs)
-	for n, pkg := range util.Predeclared() {
+	for n, pkg := range modules.Predeclared() {
 		pkgs[n] = pkg
 	}
 
@@ -133,6 +131,7 @@ func New(c *Config, opts ...Option) (Runtime, error) {
 		addonRe: options.addonRe,
 		store:   c.Store,
 		noSpin:  options.noSpin,
+		dryrun:  options.dryRun,
 	}, nil
 }
 
@@ -154,31 +153,20 @@ func (r *runtime) Load(ctx context.Context) error {
 	return nil
 }
 
-type runStatus struct {
-	err    error
-	msgs   []string
-	doneCh chan struct{}
-}
-
-// spinMsg prints spinner while waiting on doneCh to return status, then exits.
-// Closes doneCh on exit.
-func spinMsg(addonName string, doneCh chan *runStatus) {
+// spinMsg prints spinner while waiting on errCh to return error, then exits.
+func spinMsg(addonName string, errCh chan error) {
 	s := spin.New()
 	s.Set(spin.Spin1)
 	for {
 		select {
 		case <-time.After(100 * time.Millisecond):
 			fmt.Printf("\r Installing %s... %s", addonName, s.Next())
-		case s := <-doneCh:
-			defer close(s.doneCh)
-
-			if s.err != nil {
-				fmt.Printf("\r Installing %s... err: %v\n", addonName, s.err)
+		case err := <-errCh:
+			if err != nil {
+				fmt.Printf("\r Installing %s... err: %v\n", addonName, err)
 			} else {
 				fmt.Printf("\r Installing %s... done\n", addonName)
 			}
-			fmt.Printf("\t%s\n", strings.Join(s.msgs, "\n\t"))
-
 			return
 		}
 	}
@@ -202,7 +190,27 @@ func (r *runtime) runCommand(ctx context.Context, cmd Command, addons []*addon.A
 		}
 		// TODO(dmitry-ilyevskiy): Print "live" status.
 		fmt.Printf("Configured addons:\n\t%s\n", strings.Join(lstMsgs, "\n\t"))
+
 	case InstallCommand:
+		installAddonFn := func(a *addon.Addon) (err error) {
+			if r.noSpin {
+				return a.Install(ctx)
+			}
+			errCh := make(chan error)
+			go spinMsg(a.Name, errCh)
+			err = a.Install(ctx)
+			errCh <- err
+			return err
+		}
+
+		if r.dryrun {
+			if err := runUntilErr(addons, installAddonFn); err != nil {
+				return fmt.Errorf("failed addon installation: %v", err)
+			}
+			return nil
+		}
+
+		// Only create a rollout when not doing dryrun.
 		rollout, err := r.store.CreateRollout()
 		if err != nil {
 			return fmt.Errorf("failed to initilize rollout state: %v", err)
@@ -211,43 +219,9 @@ func (r *runtime) runCommand(ctx context.Context, cmd Command, addons []*addon.A
 		fmt.Printf("Beginning rollout [%v] installation...\n", rollout.ID)
 
 		if err := runUntilErr(addons, func(a *addon.Addon) (err error) {
-			if !r.noSpin {
-				doneCh := make(chan *runStatus)
-
-				// Redirect stderr while we're spinning and filter out "proto: X"
-				// log spam (restore stderr on exit).
-				oldErr := os.Stderr
-				r, w, err := os.Pipe()
-				if err != nil {
-					return fmt.Errorf("can't create pipe2 for stderr redirect: %v", err)
-				}
-				os.Stderr = w
-
-				defer func() {
-					// Restor stderr and close pipe.
-					os.Stderr = oldErr
-					w.Close()
-
-					sc := bufio.NewScanner(r)
-					s := &runStatus{err: err, doneCh: make(chan struct{})}
-					for sc.Scan() {
-						if strings.Contains(sc.Text(), "proto: ") {
-							continue
-						}
-						s.msgs = append(s.msgs, sc.Text())
-					}
-
-					doneCh <- s
-					<-s.doneCh
-				}()
-
-				go spinMsg(a.Name, doneCh)
-			}
-
-			if err := a.Install(ctx); err != nil {
+			if err := installAddonFn(a); err != nil {
 				return err
 			}
-
 			if _, err := r.store.PutAddonRun(rollout.ID, &store.AddonRun{
 				Name:    a.Name,
 				Modules: a.LoadedModules(),
@@ -255,7 +229,7 @@ func (r *runtime) runCommand(ctx context.Context, cmd Command, addons []*addon.A
 			}); err != nil {
 				return fmt.Errorf("failed to store run state for `%s' addon: %v", a.Name, err)
 			}
-			return err
+			return nil
 		}); err != nil {
 			return fmt.Errorf("failed addon installation: %v", err)
 		}
@@ -265,6 +239,7 @@ func (r *runtime) runCommand(ctx context.Context, cmd Command, addons []*addon.A
 		}
 
 		fmt.Printf("Rollout [%v] is live!\n", rollout.ID)
+
 	case RemoveCommand:
 		return runUntilErr(addons, func(a *addon.Addon) error {
 			return a.Remove(ctx)

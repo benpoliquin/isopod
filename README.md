@@ -60,7 +60,8 @@ hermetic, and extensible solution to configuration management in Kubernetes.
       - [`sleep`](#sleep)
       - [`error`](#error)
 - [Testing](#testing)
-- [Dry run as YAML Diff](#dry-run-as-yaml-diff)
+- [Dry Run Produces YAML Diffs](#dry-run-produces-yaml-diffs)
+  - [Diff filtering](#diff-filtering)
 - [License](#license)
 - [Contributions](#contributions)
 
@@ -70,7 +71,7 @@ hermetic, and extensible solution to configuration management in Kubernetes.
 
 ```shell
 $ go version
-go version go1.11 darwin/amd64
+go version go1.14 darwin/amd64
 $ GO111MODULE=on go build
 ```
 
@@ -143,7 +144,7 @@ and `ctx.location` to get `"us-west1"`. Accessing nonexistant attribute `ctx.foo
 
 Each addon is represented using the `addon()` Starlark built-in, which takes
 three arguments, for example `addon("name", "entry_file.ipd", ctx)`. The first
-argument is the addon name, used by the `--match_addon` feature. The the thrid
+argument is the addon name, used by the `--match_addon` feature. The thrid
 is optional and represents the `ctx` input to `addons(ctx)` to make the cluster
 attributes available to the addon. Each addon must implement `install(ctx)` and
 `remove(ctx)` functions.
@@ -502,7 +503,7 @@ directory by running `isopod test path/` and all tests from a current working
 subtree by running just `isopod test`.
 
 
-# Dry run as YAML Diff
+# Dry Run Produces YAML Diffs
 
 Knowledge regarding the intended actions of any specification change is crucial
 for migration and everyday configuration updates. It prevents accidental removal
@@ -528,6 +529,62 @@ call "head". The result looks like the following.
 +  type: NodePort
    sessionAffinity: None
 +  externalTrafficPolicy: Cluster
+```
+
+## Diff filtering
+
+Many fields are managed by controllers and updated at runtime, which means they
+don't match the initially specified resource definition. In order to reduce noise
+when evaluating whether a dry-run is safe to apply, some filtering is performed on
+the current and requested resource definitions.
+
+By default, Isopod attempts to apply schema defaults and filter fields that are
+set by built-in kubernetes controllers at runtime.
+
+In addition to the default filters, Isopod users may specify filters in two ways,
+individually using `--kube_diff_filter` or in bulk with `--kube_diff_filter_file`.
+
+Individual Filters Example:
+
+```
+$ isopod \
+  --vault_token "${vault_token}" \
+  --context "cluster=${cluster}" \
+  --dry_run --nospin \
+  --kube_diff_filter 'metadata.creationTimestamp' \
+  --kube_diff_filter 'metadata.annotations["isopod.getcruise.com/context"]' \
+  --kube_diff_filter 'metadata.annotations["deployment.kubernetes.io/revision"]' \
+  --kube_diff_filter 'metadata.annotations["deprecated.daemonset.template.generation"]' \
+  --kube_diff_filter 'metadata.annotations["autoscaling.alpha.kubernetes.io/conditions"]' \
+  --kube_diff_filter 'metadata.annotations["cloud.google.com/neg-status"]' \
+  --kube_diff_filter 'metadata.annotations["runscope.getcruise.com/api-test-ids"]' \
+  --kube_diff_filter 'spec.template.spec.serviceAccount' \
+  --kube_diff_filter 'spec.jobTemplate.spec.template.spec.serviceAccount' \
+  install \
+  "${DEFAULT_CONFIG_PATH}"
+```
+
+Bulk Filters Example:
+
+```
+$ cat > filters.txt <<EOF
+metadata.creationTimestamp
+metadata.annotations["isopod.getcruise.com/context"]
+metadata.annotations["deployment.kubernetes.io/revision"]
+metadata.annotations["deprecated.daemonset.template.generation"]
+metadata.annotations["autoscaling.alpha.kubernetes.io/conditions"]
+metadata.annotations["cloud.google.com/neg-status"]
+metadata.annotations["runscope.getcruise.com/api-test-ids"]
+spec.template.spec.serviceAccount
+spec.jobTemplate.spec.template.spec.serviceAccount
+EOF
+$ isopod \
+  --vault_token "${vault_token}" \
+  --context "cluster=${cluster}" \
+  --dry_run --nospin \
+  --kube_diff_filter_file "filters.txt" \
+  install \
+  "${DEFAULT_CONFIG_PATH}"
 ```
 
 
